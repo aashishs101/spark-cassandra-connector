@@ -8,7 +8,8 @@ import org.apache.spark.sql.types.StructType
 
 class DataFrameColumnMapper[T](structType: StructType) extends ColumnMapper[T] {
   override def columnMapForWriting(struct: StructDef,
-                                   selectedColumns: IndexedSeq[ColumnRef]): ColumnMapForWriting = ???
+                                   selectedColumns: IndexedSeq[ColumnRef],
+                                   isNestedUDT: Boolean = false): ColumnMapForWriting = ???
 
   override def columnMapForReading(struct: StructDef,
                                    selectedColumns: IndexedSeq[ColumnRef]): ColumnMapForReading = ???

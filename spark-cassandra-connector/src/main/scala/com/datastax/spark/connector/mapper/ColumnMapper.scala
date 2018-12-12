@@ -35,7 +35,9 @@ trait ColumnMapper[T] {
     * useful for reading property values of type `T` and writing them to Cassandra.
     * Throws [[IllegalArgumentException]] if `selectedColumns` contains some columns that
     * don't have matching getters. */
-  def columnMapForWriting(struct: StructDef, selectedColumns: IndexedSeq[ColumnRef]): ColumnMapForWriting
+  def columnMapForWriting(struct: StructDef,
+                          selectedColumns: IndexedSeq[ColumnRef],
+                          isNestedUDT: Boolean = false): ColumnMapForWriting
 
   /** Provides a definition of the table that class `T` could be saved to. */
   def newTable(

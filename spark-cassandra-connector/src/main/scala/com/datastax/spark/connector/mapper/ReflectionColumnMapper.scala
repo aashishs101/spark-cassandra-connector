@@ -89,7 +89,7 @@ abstract class ReflectionColumnMapper[T : ClassTag] extends ColumnMapper[T] {
 
   override def columnMapForWriting(
       struct: StructDef,
-      selectedColumns: IndexedSeq[ColumnRef]): ColumnMapForWriting = {
+      selectedColumns: IndexedSeq[ColumnRef], isNestedUDT: Boolean = false): ColumnMapForWriting = {
 
     val columnByName = columnRefByAliasName(selectedColumns)
 

@@ -81,7 +81,7 @@ object UserDefinedType {
     override def convertPF = {
       case udtValue: UDTValue =>
         val toSave = dataType.newValue()
-        for (i <- fieldNames.indices) {
+        for (i <- udtValue.columnValues.indices) {
           val fieldName = fieldNames(i)
           val fieldConverter = fieldConverters(i)
           val fieldValue = fieldConverter.convert(udtValue.getRaw(fieldName))

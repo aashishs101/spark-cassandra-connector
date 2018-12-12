@@ -24,6 +24,9 @@ case class KeyValueWithTimestamp(key: Int, group: Long, value: String, timestamp
 case class KeyValueWithConversion(key: String, group: Int, value: String)
 case class ClassWithWeirdProps(devil: String, cat: Int, value: String)
 
+case class AddressUDT(street: String, city: String, zip: Int)
+case class Company(name: String, address: AddressUDT)
+
 class SuperKeyValue(val key: Int, val value: String) extends Serializable
 
 class SubKeyValue(k: Int, v: String, val group: Long) extends SuperKeyValue(k, v)
@@ -974,6 +977,16 @@ class TableWriterSpec extends SparkCassandraITFlatSpecBase {
     mapOverwrite.isIdempotent should be (true)
   }
 
+  it should "work when an underlying udt is changed" in {
+    conn.withSessionDo { session =>
+      session.execute(s"""CREATE TYPE $ks.addressudt (city text, street text, zip int, number int)""")
+      session.execute(s"""CREATE TABLE $ks.companies (name text, address FROZEN<addressudt>,PRIMARY KEY (name))""")
+      val address = AddressUDT(street = "Baker street", city = "London", zip = 12345)
+      val company = Company("SomeCompany", address)
+      sc.parallelize(Seq(company)).saveToCassandra(ks, "companies")
+      val res = session.execute(s"""select json * from $ks.companies where name = 'SomeCompany'""")
+      println(res.one.getString(0))
+    }
 
-
+  }
 }
