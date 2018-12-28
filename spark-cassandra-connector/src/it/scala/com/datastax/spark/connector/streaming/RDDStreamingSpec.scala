@@ -8,11 +8,35 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.streaming.{Milliseconds, StreamingContext}
 import org.scalatest.concurrent.Eventually
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
+import scala.collection.JavaConversions._
 
 import scala.collection.mutable
 import scala.concurrent.Future
 import scala.language.postfixOps
 import scala.util.Random
+import org.apache.spark.sql.SparkSession
+import org.apache.hadoop.fs.Path
+import org.apache.spark.sql.ForeachWriter
+
+class CassandraSink[T]() extends ForeachWriter[T] {
+  // This class implements the interface ForeachWriter, which has methods that get called
+  // whenever there is a sequence of rows generated as output
+  def open(partitionId: Long, version: Long): Boolean = {
+    // open connection
+    println(s"Open connection")
+    true
+  }
+
+  def process(record: T) = {
+
+  }
+
+  def close(errorOrNull: Throwable): Unit = {
+    // close the connection
+    println(s"Close connection")
+  }
+}
+
 
 class RDDStreamingSpec
   extends SparkCassandraITFlatSpecBase
@@ -103,7 +127,7 @@ class RDDStreamingSpec
     }
   }
 
-  it should "be able to utilize joinWithCassandra during transforms " in withStreamingContext { ssc =>
+  /*it should "be able to utilize joinWithCassandra during transforms " in withStreamingContext { ssc =>
     val stream = ssc.queueStream[String](dataRDDs)
 
     val wc = stream
@@ -194,6 +218,17 @@ class RDDStreamingSpec
       result.length should be(1)
       result(0) should be(WordCount("survival", 3))
     }
+  }*/
+
+
+
+  it should "work for structuredStreaming" in {
+    val path = "spark-cassandra-connector/src/it/resources/text-logs"
+    val spark = SparkSession.builder().getOrCreate()
+    val stream = spark.readStream.format("text").load(path)
+    val sink = stream.writeStream.foreach(new CassandraSink()).start()
+
+    sink.awaitTermination()
   }
 }
 

@@ -14,6 +14,7 @@ import org.apache.spark.metrics.OutputMetricsUpdater
 
 import scala.collection._
 
+
 /** Writes RDD data into given Cassandra table.
   * Individual column values are extracted from RDD objects using given [[RowWriter]]
   * Then, data are inserted into Cassandra with batches of CQL INSERT statements.
@@ -33,85 +34,8 @@ class TableWriter[T] private (
   val columnNames = rowWriter.columnNames diff writeConf.optionPlaceholders
   val columns = columnNames.map(tableDef.columnByName)
 
-  private[connector] lazy val queryTemplateUsingInsert: String = {
-    val quotedColumnNames: Seq[String] = columnNames.map(quote)
-    val columnSpec = quotedColumnNames.mkString(", ")
-    val valueSpec = quotedColumnNames.map(":" + _).mkString(", ")
-
-    val ifNotExistsSpec = if (writeConf.ifNotExists) "IF NOT EXISTS " else ""
-
-    s"INSERT INTO ${quote(keyspaceName)}.${quote(tableName)} ($columnSpec) VALUES ($valueSpec) $ifNotExistsSpec$optionsSpec".trim
-  }
-
-  private def deleteQueryTemplate(deleteColumns: ColumnSelector): String = {
-    val deleteColumnNames: Seq[String] = deleteColumns.selectFrom(tableDef).map(_.columnName)
-    val (primaryKey, regularColumns) = columns.partition(_.isPrimaryKeyColumn)
-    if (regularColumns.nonEmpty) {
-      throw new IllegalArgumentException(
-        s"Only primary key columns can be used in delete. Regular columns found: ${regularColumns.mkString(", ")}")
-    }
-    TableWriter.checkMissingColumns(tableDef, deleteColumnNames)
-
-    def quotedColumnNames(columns: Seq[ColumnDef]) = columns.map(_.columnName).map(quote)
-    val deleteColumnsClause = deleteColumnNames.map(quote).mkString(", ")
-    val whereClause = quotedColumnNames(primaryKey).map(c => s"$c = :$c").mkString(" AND ")
-
-    val usingTimestampClause = if (timestampSpec.nonEmpty) s"USING ${timestampSpec.get}" else ""
-
-    if (ttlEnabled)
-      logWarning(s"${writeConf.ttl} is ignored for DELETE query")
-
-    s"DELETE ${deleteColumnsClause} FROM ${quote(keyspaceName)}.${quote(tableName)} $usingTimestampClause WHERE $whereClause"
-  }
-
-  private[connector] lazy val queryTemplateUsingUpdate: String = {
-    val (primaryKey, regularColumns) = columns.partition(_.isPrimaryKeyColumn)
-    val (counterColumns, nonCounterColumns) = regularColumns.partition(_.isCounterColumn)
-
-    val nameToBehavior = (columnSelector collect {
-        case cn:CollectionColumnName => cn.columnName -> cn.collectionBehavior
-      }).toMap
-
-    val setNonCounterColumnsClause = for {
-      colDef <- nonCounterColumns
-      name = colDef.columnName
-      collectionBehavior = nameToBehavior.get(name)
-      quotedName = quote(name)
-    } yield collectionBehavior match {
-        case Some(CollectionAppend)           => s"$quotedName = $quotedName + :$quotedName"
-        case Some(CollectionPrepend)          => s"$quotedName = :$quotedName + $quotedName"
-        case Some(CollectionRemove)           => s"$quotedName = $quotedName - :$quotedName"
-        case Some(CollectionOverwrite) | None => s"$quotedName = :$quotedName"
-      }
-
-    def quotedColumnNames(columns: Seq[ColumnDef]) = columns.map(_.columnName).map(quote)
-    val setCounterColumnsClause = quotedColumnNames(counterColumns).map(c => s"$c = $c + :$c")
-    val setClause = (setNonCounterColumnsClause ++ setCounterColumnsClause).mkString(", ")
-    val whereClause = quotedColumnNames(primaryKey).map(c => s"$c = :$c").mkString(" AND ")
-
-    s"UPDATE ${quote(keyspaceName)}.${quote(tableName)} $optionsSpec SET $setClause WHERE $whereClause"
-  }
-
-  private lazy val timestampSpec: Option[String] = {
-    writeConf.timestamp match {
-      case TimestampOption(PerRowWriteOptionValue(placeholder)) => Some(s"TIMESTAMP :$placeholder")
-      case TimestampOption(StaticWriteOptionValue(value)) => Some(s"TIMESTAMP $value")
-      case _ => None
-    }
-  }
-
-  private lazy val ttlEnabled: Boolean = writeConf.ttl != TTLOption.defaultValue
-
-  private lazy val optionsSpec: String = {
-    val ttlSpec = writeConf.ttl match {
-      case TTLOption(PerRowWriteOptionValue(placeholder)) => Some(s"TTL :$placeholder")
-      case TTLOption(StaticWriteOptionValue(value)) => Some(s"TTL $value")
-      case _ => None
-    }
-
-    val options = List(ttlSpec, timestampSpec).flatten
-    if (options.nonEmpty) s"USING ${options.mkString(" AND ")}" else ""
-  }
+  private[connector] lazy val queryTemplateUsingInsert: String = TableWriter.queryTemplateForInsert(tableDef, columnNames, writeConf)
+  private[connector] lazy val queryTemplateUsingUpdate: String = TableWriter.queryTemplateForUpdate(tableDef, columns, columnSelector, writeConf)
 
   private val isCounterUpdate =
     tableDef.columns.exists(_.isCounterColumn)
@@ -119,38 +43,7 @@ class TableWriter[T] private (
   private val containsCollectionBehaviors =
     columnSelector.exists(_.isInstanceOf[CollectionColumnName])
 
-  private[connector] val isIdempotent: Boolean = {
-    //All counter operations are not Idempotent
-    if (columns.filter(_.isCounterColumn).nonEmpty) {
-        false
-    } else {
-      columnSelector.forall {
-        //Any appends or prepends to a list are non-idempotent
-        case cn: CollectionColumnName =>
-          val name = cn.columnName
-          val behavior = cn.collectionBehavior
-          val isNotList = !tableDef.columnByName(name).columnType.isInstanceOf[ListType[_]]
-          behavior match {
-            case CollectionPrepend => isNotList
-            case CollectionAppend => isNotList
-            case _ => true
-          }
-        //All other operations on regular columns are idempotent
-        case regularColumn: ColumnRef => true
-      }
-    }
-  }
-
-
-  private def prepareStatement(queryTemplate:String, session: Session): PreparedStatement = {
-    try {
-      session.prepare(queryTemplate).setIdempotent(isIdempotent)
-    }
-    catch {
-      case t: Throwable =>
-        throw new IOException(s"Failed to prepare statement $queryTemplate: " + t.getMessage, t)
-    }
-  }
+  private[connector] val isIdempotent: Boolean = TableWriter.isIdempotent(columns, columnSelector, tableDef)
 
   def batchRoutingKey(session: Session, routingKeyGenerator: RoutingKeyGenerator)(bs: BoundStatement): Any = {
     writeConf.batchGroupingKey match {
@@ -202,15 +95,15 @@ class TableWriter[T] private (
     * @param taskContext
     * @param data primary key values to select delete rows
     */
-  def delete(columns: ColumnSelector) (taskContext: TaskContext, data: Iterator[T]): Unit =
-    writeInternal(deleteQueryTemplate(columns), taskContext, data)
+  def delete(columnsToDelete: ColumnSelector) (taskContext: TaskContext, data: Iterator[T]): Unit =
+    writeInternal(TableWriter.deleteQueryTemplate(columnsToDelete, columns, writeConf, tableDef), taskContext, data)
 
   private def writeInternal(queryTemplate: String, taskContext: TaskContext, data: Iterator[T]) {
     val updater = OutputMetricsUpdater(taskContext, writeConf)
     connector.withSessionDo { session =>
       val protocolVersion = session.getCluster.getConfiguration.getProtocolOptions.getProtocolVersion
       val rowIterator = new CountingIterator(data)
-      val stmt = prepareStatement(queryTemplate, session).setConsistencyLevel(writeConf.consistencyLevel)
+      val stmt = TableWriter.prepareStatement(queryTemplate, session, isIdempotent).setConsistencyLevel(writeConf.consistencyLevel)
       val queryExecutor = new QueryExecutor(session, writeConf.parallelismLevel,
         Some(updater.batchFinished(success = true, _, _, _)), Some(updater.batchFinished(success = false, _, _, _)))
       val routingKeyGenerator = new RoutingKeyGenerator(tableDef, columnNames)
@@ -256,7 +149,7 @@ class TableWriter[T] private (
   }
 }
 
-object TableWriter {
+object TableWriter extends Logging {
 
   private def checkMissingColumns(table: TableDef, columnNames: Seq[String]) {
     val allColumnNames = table.columns.map(_.columnName)
@@ -392,4 +285,119 @@ object TableWriter {
     checkColumns(tableDef, selectedColumns, checkPartitionKey)
     new TableWriter[T](connector, tableDef, selectedColumns, rowWriter, writeConf)
   }
+
+  def timestampSpec(writeConf: WriteConf): Option[String] =
+    writeConf.timestamp match {
+      case TimestampOption(PerRowWriteOptionValue(placeholder)) => Some(s"TIMESTAMP :$placeholder")
+      case TimestampOption(StaticWriteOptionValue(value)) => Some(s"TIMESTAMP $value")
+      case _ => None
+    }
+
+  def ttlSpec(writeConf: WriteConf): Option[String] =
+    writeConf.ttl match {
+      case TTLOption(PerRowWriteOptionValue(placeholder)) => Some(s"TTL :$placeholder")
+      case TTLOption(StaticWriteOptionValue(value)) => Some(s"TTL $value")
+      case _ => None
+    }
+
+  def optionsSpec(writeConf: WriteConf): String = {
+    val options = List(ttlSpec(writeConf), timestampSpec(writeConf)).flatten
+    if (options.nonEmpty) s"USING ${options.mkString(" AND ")}" else ""
+  }
+
+  def queryTemplateForInsert(tableDef: TableDef, columnNames: Seq[String], writeConf: WriteConf): String = {
+    val quotedColumnNames: Seq[String] = columnNames.map(quote)
+    val columnSpec = quotedColumnNames.mkString(", ")
+    val valueSpec = quotedColumnNames.map(":" + _).mkString(", ")
+    val ifNotExistsSpec = if (writeConf.ifNotExists) "IF NOT EXISTS " else ""
+    s"INSERT INTO ${quote(tableDef.keyspaceName)}.${quote(tableDef.tableName)} ($columnSpec) VALUES ($valueSpec) $ifNotExistsSpec${optionsSpec(writeConf)}".trim
+  }
+
+  private def deleteQueryTemplate(deleteColumns: ColumnSelector,
+                                  columns: Seq[ColumnDef],
+                                  writeConf: WriteConf,
+                                  tableDef: TableDef): String = {
+    val deleteColumnNames: Seq[String] = deleteColumns.selectFrom(tableDef).map(_.columnName)
+    val (primaryKey, regularColumns) = columns.partition(_.isPrimaryKeyColumn)
+    if (regularColumns.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Only primary key columns can be used in delete. Regular columns found: ${regularColumns.mkString(", ")}")
+    }
+    val ttlEnabled: Boolean = writeConf.ttl != TTLOption.defaultValue
+    TableWriter.checkMissingColumns(tableDef, deleteColumnNames)
+
+    def quotedColumnNames(columns: Seq[ColumnDef]) = columns.map(_.columnName).map(quote)
+    val deleteColumnsClause = deleteColumnNames.map(quote).mkString(", ")
+    val whereClause = quotedColumnNames(primaryKey).map(c => s"$c = :$c").mkString(" AND ")
+
+    val usingTimestampClause = if (timestampSpec(writeConf).nonEmpty) s"USING ${timestampSpec(writeConf).get}" else ""
+
+    if (ttlEnabled)
+      logWarning(s"${writeConf.ttl} is ignored for DELETE query")
+
+    s"DELETE ${deleteColumnsClause} FROM ${quote(tableDef.keyspaceName)}.${quote(tableDef.tableName)} $usingTimestampClause WHERE $whereClause"
+  }
+
+  def queryTemplateForUpdate(tableDef: TableDef,
+                               columns: Seq[ColumnDef],
+                               columnSelector: IndexedSeq[ColumnRef],
+                               writeConf: WriteConf): String = {
+    val (primaryKey, regularColumns) = columns.partition(_.isPrimaryKeyColumn)
+    val (counterColumns, nonCounterColumns) = regularColumns.partition(_.isCounterColumn)
+
+    val nameToBehavior = (columnSelector collect {
+      case cn:CollectionColumnName => cn.columnName -> cn.collectionBehavior
+    }).toMap
+
+    val setNonCounterColumnsClause = for {
+      colDef <- nonCounterColumns
+      name = colDef.columnName
+      collectionBehavior = nameToBehavior.get(name)
+      quotedName = quote(name)
+    } yield collectionBehavior match {
+      case Some(CollectionAppend)           => s"$quotedName = $quotedName + :$quotedName"
+      case Some(CollectionPrepend)          => s"$quotedName = :$quotedName + $quotedName"
+      case Some(CollectionRemove)           => s"$quotedName = $quotedName - :$quotedName"
+      case Some(CollectionOverwrite) | None => s"$quotedName = :$quotedName"
+    }
+    def quotedColumnNames(columns: Seq[ColumnDef]) = columns.map(_.columnName).map(quote)
+    val setCounterColumnsClause = quotedColumnNames(counterColumns).map(c => s"$c = $c + :$c")
+    val setClause = (setNonCounterColumnsClause ++ setCounterColumnsClause).mkString(", ")
+    val whereClause = quotedColumnNames(primaryKey).map(c => s"$c = :$c").mkString(" AND ")
+
+    s"UPDATE ${quote(tableDef.keyspaceName)}.${quote(tableDef.tableName)} ${optionsSpec(writeConf)} SET $setClause WHERE $whereClause"
+  }
+
+  def prepareStatement(queryTemplate:String, session: Session, isIdempotent: Boolean): PreparedStatement = {
+    try {
+      session.prepare(queryTemplate).setIdempotent(isIdempotent)
+    }
+    catch {
+      case t: Throwable =>
+        throw new IOException(s"Failed to prepare statement $queryTemplate: " + t.getMessage, t)
+    }
+  }
+
+  def isIdempotent(columns: Seq[ColumnDef], columnSelector: IndexedSeq[ColumnRef], tableDef: TableDef): Boolean = {
+    //All counter operations are not Idempotent
+    if (columns.filter(_.isCounterColumn).nonEmpty) {
+      false
+    } else {
+      columnSelector.forall {
+        //Any appends or prepends to a list are non-idempotent
+        case cn: CollectionColumnName =>
+          val name = cn.columnName
+          val behavior = cn.collectionBehavior
+          val isNotList = !tableDef.columnByName(name).columnType.isInstanceOf[ListType[_]]
+          behavior match {
+            case CollectionPrepend => isNotList
+            case CollectionAppend => isNotList
+            case _ => true
+          }
+        //All other operations on regular columns are idempotent
+        case regularColumn: ColumnRef => true
+      }
+    }
+  }
+
 }
