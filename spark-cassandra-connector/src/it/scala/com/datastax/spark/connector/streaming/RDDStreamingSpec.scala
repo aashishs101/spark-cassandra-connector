@@ -9,7 +9,9 @@ import org.apache.spark.streaming.{Milliseconds, StreamingContext}
 import org.scalatest.concurrent.Eventually
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 import scala.collection.JavaConversions._
-
+import com.datastax.spark.connector.writer.WriteConf
+import org.apache.spark.sql.types.{StructType, StructField, StringType, IntegerType}
+import org.apache.spark.sql.functions._
 import scala.collection.mutable
 import scala.concurrent.Future
 import scala.language.postfixOps
@@ -17,25 +19,13 @@ import scala.util.Random
 import org.apache.spark.sql.SparkSession
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.ForeachWriter
+import com.datastax.spark.connector.writer.CassandraSink
+import com.datastax.spark.connector.AllColumns
+import scala.util.Try
+import scala.collection.JavaConverters._
 
-class CassandraSink[T]() extends ForeachWriter[T] {
-  // This class implements the interface ForeachWriter, which has methods that get called
-  // whenever there is a sequence of rows generated as output
-  def open(partitionId: Long, version: Long): Boolean = {
-    // open connection
-    println(s"Open connection")
-    true
-  }
 
-  def process(record: T) = {
-
-  }
-
-  def close(errorOrNull: Throwable): Unit = {
-    // close the connection
-    println(s"Close connection")
-  }
-}
+case class Something(id: String, value: Long)
 
 
 class RDDStreamingSpec
@@ -223,12 +213,30 @@ class RDDStreamingSpec
 
 
   it should "work for structuredStreaming" in {
+    CassandraConnector(defaultConf).withSessionDo { session =>
+      session.execute(s"create table $ks.something (id text primary key, value int)")
+    }
+
+    val schema = StructType(
+      Seq(
+        StructField("id", StringType, false),
+        StructField("value", IntegerType, false)
+      )
+    )
+
     val path = "spark-cassandra-connector/src/it/resources/text-logs"
     val spark = SparkSession.builder().getOrCreate()
-    val stream = spark.readStream.format("text").load(path)
-    val sink = stream.writeStream.foreach(new CassandraSink()).start()
-
-    sink.awaitTermination()
+    val connector = CassandraConnector(defaultConf)
+    val columnSelector = AllColumns
+    val writeConf = WriteConf()
+    import spark.implicits._
+    val cassandraSink = new CassandraSink[Something]("something", ks, connector, columnSelector, writeConf)
+    val stream = spark.readStream.format("text").load(path).select(from_json($"value", schema) as "data").select("data.*").as[Something]
+    val sink = stream.writeStream.foreach(cassandraSink).start()
+    Try{sink.awaitTermination()}
+    CassandraConnector(defaultConf).withSessionDo { session =>
+      session.execute(s"select * from $ks.something").all.asScala.foreach(println)
+    }
   }
 }
 
