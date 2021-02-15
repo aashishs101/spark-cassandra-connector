@@ -90,7 +90,8 @@ class DefaultColumnMapper[T : TypeTag](columnNameOverride: Map[String, String] =
 
   override def columnMapForWriting(
       struct: StructDef,
-      selectedColumns: IndexedSeq[ColumnRef]): ColumnMapForWriting = {
+      selectedColumns: IndexedSeq[ColumnRef],
+      isNestedUDT: Boolean = false): ColumnMapForWriting = {
 
     val columns = columnByName(selectedColumns)
 
@@ -104,8 +105,12 @@ class DefaultColumnMapper[T : TypeTag](columnNameOverride: Map[String, String] =
     // Check if we have all the required columns:
     val mappedColumns = getterMap.values.toSet
     val unmappedColumns = selectedColumns.filterNot(mappedColumns)
-    require(unmappedColumns.isEmpty, s"Columns not found in $tpe: [${unmappedColumns.mkString(", ")}]")
 
+    if (!isNestedUDT)
+      require(unmappedColumns.isEmpty, s"Columns not found in nested $tpe: [${unmappedColumns.mkString(", ")}]")
+    else
+      require(selectedColumns.endsWith(unmappedColumns),
+        s"Unmapped columns nust be at end of table definition: [${unmappedColumns.mkString(", ")}]")
     SimpleColumnMapForWriting(getterMap)
   }
   

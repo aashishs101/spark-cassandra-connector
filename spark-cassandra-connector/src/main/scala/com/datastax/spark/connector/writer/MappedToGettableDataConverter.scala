@@ -22,9 +22,14 @@ private[connector] object MappedToGettableDataConverter extends Logging{
   def apply[T : TypeTag : ColumnMapper](
     struct: StructDef,
     columnSelection: IndexedSeq[ColumnRef],
-    forceClassLoader: Option[ClassLoader] = None): TypeConverter[struct.ValueRepr] =
+    forceClassLoader: Option[ClassLoader] = None,
+    isNestedUDT: Boolean = false): TypeConverter[struct.ValueRepr] =
 
     new TypeConverter[struct.ValueRepr] {
+
+      /** If this is a nested UDT, we want to use the number of indices in the scala type (which should be the same
+        * size or smaller than the number of columns, otherwise an exception will be thrown. */
+      private lazy val columnIndices = if (isNestedUDT) scalaTypes.indices else columnTypes.indices
 
       /** To determine which default column mapper to use for UDT fields.
         * If this class is a Java bean, then the UDT fields will be mapped with
@@ -32,8 +37,8 @@ private[connector] object MappedToGettableDataConverter extends Logging{
       private val isJavaBean =
         implicitly[ColumnMapper[T]].isInstanceOf[JavaBeanColumnMapper[_]]
 
-      private val columnMap =
-        implicitly[ColumnMapper[T]].columnMapForWriting(struct, columnSelection)
+      private lazy val columnMap =
+        implicitly[ColumnMapper[T]].columnMapForWriting(struct, columnSelection, isNestedUDT)
 
       /** Returns the column mapper associated with the given type.
         * Used to find column mappers for UDT columns.
@@ -118,7 +123,7 @@ private[connector] object MappedToGettableDataConverter extends Logging{
             // ColumnMappers support mapping Scala tuples, so we don't need a special case for them.
             case (t: StructDef, _) =>
               implicit val cm: ColumnMapper[U] = columnMapper[U]
-              apply[U](t, t.columnRefs, Some(childClassloader))
+              apply[U](t, t.columnRefs, Some(childClassloader), isNestedUDT = true)
 
             // Primitive types
             case _ =>
@@ -163,7 +168,7 @@ private[connector] object MappedToGettableDataConverter extends Logging{
       }
 
       private val getters =
-        columnNames.map(getterByColumnName)
+        columnNames.flatMap(col => getterByColumnName.get(col))
 
       @transient
       private val scalaTypes: IndexedSeq[Type] =
@@ -176,7 +181,7 @@ private[connector] object MappedToGettableDataConverter extends Logging{
         new PropertyExtractor(cls, getters)
 
       private val converters = {
-        for (i <- columnNames.indices) yield {
+        for (i <- columnIndices) yield {
           try {
             val ct = columnTypes(i)
             val st = scalaTypes(i)
@@ -197,13 +202,14 @@ private[connector] object MappedToGettableDataConverter extends Logging{
 
       override def convertPF = {
         case obj if cls.isInstance(obj) =>
+
           val columnValues = extractor.extract(obj.asInstanceOf[T])
-          for (i <- columnValues.indices)
+          for (i <- columnIndices)
             columnValues(i) = converters(i).convert(columnValues(i))
           struct.newInstance(columnValues: _*)
         case Some(obj) if cls.isInstance(obj) =>
           val columnValues = extractor.extract(obj.asInstanceOf[T])
-          for (i <- columnValues.indices)
+          for (i <- columnIndices)
             columnValues(i) = converters(i).convert(columnValues(i))
           struct.newInstance(columnValues: _*)
         case None =>

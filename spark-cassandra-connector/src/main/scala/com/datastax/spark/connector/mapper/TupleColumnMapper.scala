@@ -30,7 +30,9 @@ class TupleColumnMapper[T : TypeTag] extends ColumnMapper[T] {
       allowsNull = false)
   }
   
-  override def columnMapForWriting(struct: StructDef, selectedColumns: IndexedSeq[ColumnRef]) = {
+  override def columnMapForWriting(struct: StructDef,
+                                   selectedColumns: IndexedSeq[ColumnRef],
+                                   isNestedUDT: Boolean = false) = {
     val GetterRegex = "_([0-9]+)".r
 
     require(

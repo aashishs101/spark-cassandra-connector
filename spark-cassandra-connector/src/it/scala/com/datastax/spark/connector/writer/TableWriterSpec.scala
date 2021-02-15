@@ -24,6 +24,10 @@ case class KeyValueWithTimestamp(key: Int, group: Long, value: String, timestamp
 case class KeyValueWithConversion(key: String, group: Int, value: String)
 case class ClassWithWeirdProps(devil: String, cat: Int, value: String)
 
+case class DoublyNestedUDT(id: String, value1: Int)
+case class NestedUDT(id: String, value1: String, value2: DoublyNestedUDT)
+case class TopLevel(name: String, data: NestedUDT)
+
 class SuperKeyValue(val key: Int, val value: String) extends Serializable
 
 class SubKeyValue(k: Int, v: String, val group: Long) extends SuperKeyValue(k, v)
@@ -974,6 +978,19 @@ class TableWriterSpec extends SparkCassandraITFlatSpecBase {
     mapOverwrite.isIdempotent should be (true)
   }
 
+    it should "work when a nested underlying udt is changed" in {
+      conn.withSessionDo { session =>
+        session.execute(s"""CREATE TYPE $ks.doubly_nested_udt (id text, value1 int, value2 text)""")
+        session.execute(s"""CREATE TYPE $ks.nested_udt (id text, value1 text, value2 frozen<doubly_nested_udt>, value3 text)""")
+        session.execute(s"""CREATE TABLE $ks.top_level (name text primary key, data frozen<nested_udt>)""")
+        val doublyNested = DoublyNestedUDT(id = "some_id", value1 = 5)
+        val nested = NestedUDT(id = "some_id", value1 = "value", value2 = doublyNested)
+        val topLevel = TopLevel("top_level_name", data = nested)
+        sc.parallelize(Seq(topLevel)).saveToCassandra(ks, "top_level")
 
+        val result = sc.cassandraTable[TopLevel](ks, "top_level").collect.head
 
+        result should be (TopLevel("top_level_name", NestedUDT("some_id", "value", DoublyNestedUDT("some_id", 5))))
+      }
+  }
 }
